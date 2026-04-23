@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+import re
+import socket
 from datetime import datetime, timedelta, date
 
 import gspread
@@ -13,7 +15,7 @@ from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message, CallbackQuery, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 
@@ -40,7 +42,6 @@ class Form(StatesGroup):
     email = State()
     location = State()
     gender = State()
-    ipn = State()
     age = State()
     vuln = State()
     consult = State()
@@ -54,20 +55,42 @@ class Form(StatesGroup):
 
 dp = Dispatcher(storage=MemoryStorage())
 
-ZOOM = "https://us04web.zoom.us/j/3059870825?pwd=S2ozbDg4Mi9EQkxFaXB0QUVsUlFFQT09"
+LEGAL_ZOOM = "https://us04web.zoom.us/j/3059870825?pwd=S2ozbDg4Mi9EQkxFaXB0QUVsUlFFQT09"
+FINANCIAL_ZOOM = "https://us05web.zoom.us/j/5101715546?pwd=jA48a2jeSO7FFLmCbCreP5lbOMGcnb.1"
 ADDRESS = "м. Київ, вул. М. Берлінського, буд. 15"
-MAP = "https://www.google.com/maps/search/?api=1&query=%D0%9A%D0%B8%D1%97%D0%B2+%D0%91%D0%B5%D1%80%D0%BB%D1%96%D0%BD%D1%81%D1%8C%D0%BA%D0%BE%D0%B3%D0%BE+15"
+MAP_LAT = 50.475072050435394
+MAP_LON = 30.440719552813096
 
 WELCOME_TEXT = (
-    "Вітаємо!\n\n"
-    "Команда проєкту GROW (Карітас-Київ) готова надати безкоштовні консультації "
-    "з юридичних та бухгалтерських питань.\n\n"
-    "Щоб записатись, натисніть «Далі»."
+    "ОГОЛОШЕННЯ\n\n"
+    "Команда експертів проєкту GROW з економічного відновлення вітає Вас!\n"
+    "Наші спеціалісти готові надати консультаційну підтримку з фінансових "
+    "та юридичних питань для старту та розвитку власної справи.\n\n"
+    "Персональні консультації надаються безкоштовно для мешканців м. Києва та "
+    "Київської області, які постраждали внаслідок військової агресії та належать "
+    "до вразливих категорій.\n\n"
+    "Заповніть, будь ласка, форму реєстрації та оберіть тему консультацій, "
+    "зручний час та формат спілкування з нашими експертами."
 )
 
 CONSENT_TEXT = (
-    "Перед початком нам потрібна Ваша згода на обробку персональних даних.\n\n"
-    "Чи погоджуєтесь Ви?"
+    "Чи даєте Ви згоду на обробку ваших персональних даних відповідно до Закону України "
+    "\"Про захист персональних даних\"?\n\n"
+    "Участь у цьому проєкті є абсолютно добровільною та Ви самі вирішуєте, чи хочете "
+    "взяти участь. Всі заходи, які будуть організовуватися Карітасом у межах цього "
+    "проєкту, є безкоштовними.\n\n"
+    "Без Вашої згоди на обробку персональних даних подальша допомога є неможливою.\n\n"
+    "Ви маєте право подати скаргу щодо використання ваших особистих даних через "
+    "feedback@caritas.ua або заповнити спеціальну форму на сайті МБФ «Карітас України» "
+    "(www.caritas.ua/sos)\n"
+    "Номер гарячої лінії Карітас України: 0800 336 734"
+)
+
+FINAL_CONTACTS_TEXT = (
+    "Благодійна організація “Благодійний фонд “Карітас-Київ”\n"
+    "04060 м. Київ, вул. М. Берлинського, 15\n"
+    "03028 м. Київ, вул. Малокитаївська, 82\n\n"
+    "Тел: 098-189-3515 Mail:info@caritas.kyiv.ua"
 )
 
 VULNERABILITY_OPTIONS = {
@@ -82,21 +105,23 @@ VULNERABILITY_OPTIONS = {
 
 CONSULTATION_TYPES = {
     "legal": "Юридичні",
-    "accounting": "Бухгалтерські",
+    "financial": "Фінансові",
 }
 
 
-def save_to_sheet(data: dict, message: Message) -> None:
+def get_zoom_link(consult_code: str) -> str:
+    if consult_code == "financial":
+        return FINANCIAL_ZOOM
+    return LEGAL_ZOOM
+
+
+def save_to_sheet(data: dict) -> None:
     row = [
-        datetime.now().strftime("%Y-%m-%d %H:%M"),
-        message.from_user.id if message.from_user else "",
-        message.from_user.username if message.from_user else "",
         data.get("name", ""),
         data.get("phone", ""),
         data.get("email", ""),
         data.get("location", ""),
         data.get("gender", ""),
-        data.get("ipn", ""),
         data.get("age", ""),
         ", ".join(data.get("vulnerability_labels", [])),
         data.get("consult", ""),
@@ -114,16 +139,16 @@ def get_taken_slots(label: str, selected_date: str) -> set[str]:
     taken = set()
 
     for row in rows[1:]:
-        if len(row) < 15:
+        if len(row) < 11:
             continue
-        if row[11] == label and row[13] == selected_date:
-            taken.add(row[14])
+        if row[7] == label and row[9] == selected_date:
+            taken.add(row[10])
 
     return taken
 
 
 def times(code: str) -> list[str]:
-    if code == "accounting":
+    if code == "financial":
         return ["10:00", "11:00", "12:00", "13:00", "14:00", "15:00"]
     return ["10:30", "11:30", "12:30", "13:30", "14:30", "15:30"]
 
@@ -158,7 +183,7 @@ def kb_gender():
 def kb_consult():
     b = InlineKeyboardBuilder()
     b.button(text="Юридичні", callback_data="c:legal")
-    b.button(text="Бухгалтерські", callback_data="c:accounting")
+    b.button(text="Фінансові", callback_data="c:financial")
     b.adjust(1)
     return b.as_markup()
 
@@ -191,15 +216,6 @@ def kb_confirm():
     b.button(text="Так", callback_data="ok")
     b.button(text="Ні", callback_data="cancel")
     b.adjust(2)
-    return b.as_markup()
-
-
-def kb_map_confirm():
-    b = InlineKeyboardBuilder()
-    b.row(InlineKeyboardButton(text="Відкрити на карті", url=MAP))
-    b.button(text="Так", callback_data="ok")
-    b.button(text="Ні", callback_data="cancel")
-    b.adjust(1, 2)
     return b.as_markup()
 
 
@@ -242,15 +258,44 @@ def kb_times(selected_date: str, code: str, label: str):
     return b.as_markup()
 
 
+def is_valid_phone(phone: str) -> bool:
+    return bool(re.fullmatch(r"0\d{9}", phone.strip()))
+
+
+def is_valid_email(email: str) -> bool:
+    email = email.strip().lower()
+
+    if not re.fullmatch(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}", email):
+        return False
+
+    local, domain = email.rsplit("@", 1)
+
+    if ".." in email or local.startswith(".") or local.endswith("."):
+        return False
+    if domain.startswith("-") or domain.endswith("-") or ".." in domain:
+        return False
+
+    original_timeout = socket.getdefaulttimeout()
+    try:
+        socket.setdefaulttimeout(3)
+        socket.getaddrinfo(domain, None)
+        return True
+    except socket.gaierror:
+        return False
+    except OSError:
+        return False
+    finally:
+        socket.setdefaulttimeout(original_timeout)
+
+
 def summary(data: dict) -> str:
     txt = (
-        "Перевірте, будь ласка, дані:\n\n"
+        "<b>Перевірте, та підтвердіть, будь ласка, дані:</b>\n\n"
         f"ПІБ: {data.get('name', '')}\n"
         f"Телефон: {data.get('phone', '')}\n"
         f"Email: {data.get('email', '')}\n"
-        f"Місце проживання: {data.get('location', '')}\n"
+        f"Адреса проживання: {data.get('location', '')}\n"
         f"Стать: {data.get('gender', '')}\n"
-        f"ІПН: {data.get('ipn', '')}\n"
         f"Вік: {data.get('age', '')}\n"
         f"Категорії: {', '.join(data.get('vulnerability_labels', []))}\n"
         f"Напрямок: {data.get('consult', '')}\n"
@@ -262,24 +307,11 @@ def summary(data: dict) -> str:
 
     if data.get("format") == "Онлайн":
         if data.get("online") == "Zoom":
-            txt += f"\nZoom:\n{ZOOM}"
+            txt += f"\nZoom:\n{get_zoom_link(data.get('code', 'legal'))}"
         else:
             txt += "\nТелефонна консультація"
 
     return txt
-
-
-def is_valid_ipn(ipn: str) -> bool:
-    if not ipn.isdigit() or len(ipn) != 10:
-        return False
-
-    digits = [int(d) for d in ipn]
-    weights = [-1, 5, 7, 9, 4, 6, 10, 5, 7]
-    checksum = sum(d * w for d, w in zip(digits[:9], weights))
-    control = checksum % 11
-    if control > 9:
-        control = control % 10
-    return control == digits[9]
 
 
 @dp.message(CommandStart())
@@ -311,55 +343,68 @@ async def consent_no_handler(callback: CallbackQuery, state: FSMContext) -> None
 
 @dp.message(Form.name)
 async def phone_handler_start(message: Message, state: FSMContext) -> None:
-    await state.update_data(name=message.text.strip())
+    name = message.text.strip()
+    if len(name) < 5:
+        await message.answer("Будь ласка, вкажіть повне ПІБ.")
+        return
+
+    await state.update_data(name=name)
     await state.set_state(Form.phone)
-    await message.answer("Вкажіть номер телефону:")
+    await message.answer("Вкажіть номер телефону: формат 0123456789")
 
 
 @dp.message(Form.phone)
 async def email_handler_start(message: Message, state: FSMContext) -> None:
-    await state.update_data(phone=message.text.strip())
+    phone = message.text.strip()
+    if not is_valid_phone(phone):
+        await message.answer("Некоректний формат номера. Приклад: 0123456789")
+        return
+
+    await state.update_data(phone=phone)
     await state.set_state(Form.email)
     await message.answer("Вкажіть електронну пошту:")
 
 
 @dp.message(Form.email)
 async def location_handler_start(message: Message, state: FSMContext) -> None:
-    await state.update_data(email=message.text.strip())
+    email = message.text.strip()
+    if not is_valid_email(email):
+        await message.answer("Схоже, ця електронна пошта некоректна або домен не існує. Спробуйте ще раз.")
+        return
+
+    await state.update_data(email=email)
     await state.set_state(Form.location)
-    await message.answer("Вкажіть місце проживання:")
+    await message.answer("Вкажіть адресу проживання")
 
 
 @dp.message(Form.location)
 async def gender_handler_start(message: Message, state: FSMContext) -> None:
-    await state.update_data(location=message.text.strip())
+    location = message.text.strip()
+    if len(location) < 3:
+        await message.answer("Будь ласка, вкажіть адресу проживання.")
+        return
+
+    await state.update_data(location=location)
     await state.set_state(Form.gender)
     await message.answer("Оберіть стать:", reply_markup=kb_gender())
 
 
 @dp.callback_query(Form.gender, F.data.startswith("g:"))
-async def ipn_handler_start(callback: CallbackQuery, state: FSMContext) -> None:
+async def age_handler_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(gender=callback.data.split(":", 1)[1])
-    await state.set_state(Form.ipn)
-    await callback.message.edit_text("Вкажіть ІПН:")
-    await callback.answer()
-
-
-@dp.message(Form.ipn)
-async def age_handler_start(message: Message, state: FSMContext) -> None:
-    ipn = message.text.strip()
-    if not is_valid_ipn(ipn):
-        await message.answer("Некоректний ІПН. Перевірте номер і спробуйте ще раз.")
-        return
-
-    await state.update_data(ipn=ipn)
     await state.set_state(Form.age)
-    await message.answer("Вкажіть Ваш вік:")
+    await callback.message.edit_text("Вкажіть Ваш вік:")
+    await callback.answer()
 
 
 @dp.message(Form.age)
 async def vuln_handler_start(message: Message, state: FSMContext) -> None:
-    await state.update_data(age=message.text.strip(), vulnerability_labels=[])
+    age = message.text.strip()
+    if not age.isdigit():
+        await message.answer("Вік треба вказати числом.")
+        return
+
+    await state.update_data(age=age, vulnerability_labels=[])
     await state.set_state(Form.vuln)
     await message.answer(
         "Оберіть категорії вразливості. Можна вибрати декілька. Після вибору натисніть «Готово».",
@@ -402,13 +447,20 @@ async def question_handler_start(callback: CallbackQuery, state: FSMContext) -> 
 
     await state.update_data(consult=label, code=code)
     await state.set_state(Form.question)
-    await callback.message.edit_text("Опишіть коротко Ваше питання:")
+    await callback.message.edit_text(
+        "Опишіть коротко Ваше питання (не менше 100 символів):"
+    )
     await callback.answer()
 
 
 @dp.message(Form.question)
 async def date_handler_start(message: Message, state: FSMContext) -> None:
-    await state.update_data(question=message.text.strip())
+    question = message.text.strip()
+    if len(question) < 100:
+        await message.answer("Будь ласка, опишіть питання детальніше. Потрібно не менше 100 символів.")
+        return
+
+    await state.update_data(question=question)
     await state.set_state(Form.date)
     await message.answer("Оберіть дату:", reply_markup=kb_dates())
 
@@ -458,10 +510,8 @@ async def format_handler(callback: CallbackQuery, state: FSMContext) -> None:
         await state.update_data(format="Офлайн", online="")
         await state.set_state(Form.confirm)
         data = await state.get_data()
-        await callback.message.edit_text(
-            summary(data) + f"\n\nАдреса: {ADDRESS}",
-            reply_markup=kb_map_confirm()
-        )
+        await callback.message.edit_text(summary(data) + f"\n\nАдреса: {ADDRESS}", reply_markup=kb_confirm())
+        await callback.message.answer_location(latitude=MAP_LAT, longitude=MAP_LON)
         await callback.answer()
     else:
         await state.update_data(format="Онлайн")
@@ -472,9 +522,12 @@ async def format_handler(callback: CallbackQuery, state: FSMContext) -> None:
 
 @dp.callback_query(Form.online_type, F.data.startswith("on:"))
 async def online_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    zoom_link = get_zoom_link(data.get("code", "legal"))
+
     if callback.data == "on:zoom":
         await state.update_data(online="Zoom")
-        await callback.message.edit_text(f"Zoom:\n{ZOOM}", reply_markup=kb_next())
+        await callback.message.edit_text(f"Zoom:\n{zoom_link}", reply_markup=kb_next())
         await callback.answer()
     else:
         await state.update_data(online="Телефон")
@@ -503,17 +556,25 @@ async def done_handler(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Слот зайнято")
         return
 
-    save_to_sheet(data, callback.message)
+    save_to_sheet(data)
 
     txt = (
-        "Дякуємо за реєстрацію.\n\n"
-        "З Вами зв’яжуться."
+        "Дякуємо за Ваш час.\n\n"
+        "Наші консультанти зв’яжуться з Вами для надання консультації відповідно до вказаної інформації."
     )
 
     if data.get("online") == "Zoom":
-        txt += "\n\nВикористайте Zoom посилання у вибраний час."
+        txt += (
+            "\n\n"
+            "Якщо Ви обрали консультацію в Zoom, фахівець буде очікувати Вас у вибраний день "
+            "та час за наданим посиланням."
+        )
 
-    txt += "\n\n+380937011342"
+    txt += (
+        "\n\n"
+        "У разі виникнення додаткових питань, телефонуйте, будь ласка, за номером: +380937011342\n\n"
+        f"{FINAL_CONTACTS_TEXT}"
+    )
 
     await state.clear()
     await callback.message.answer(txt)
