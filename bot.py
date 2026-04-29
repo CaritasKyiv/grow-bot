@@ -42,7 +42,7 @@ class Form(StatesGroup):
     email = State()
     location = State()
     gender = State()
-    age = State()
+    birth_date = State()
     vuln = State()
     consult = State()
     question = State()
@@ -122,7 +122,7 @@ def save_to_sheet(data: dict) -> None:
         data.get("email", ""),
         data.get("location", ""),
         data.get("gender", ""),
-        data.get("age", ""),
+        data.get("birth_date", ""),
         ", ".join(data.get("vulnerability_labels", [])),
         data.get("consult", ""),
         data.get("question", ""),
@@ -219,6 +219,13 @@ def kb_confirm():
     return b.as_markup()
 
 
+def kb_restart():
+    b = InlineKeyboardBuilder()
+    b.button(text="Записатися ще раз", callback_data="restart")
+    b.adjust(1)
+    return b.as_markup()
+
+
 def kb_vuln(selected: list[str]):
     b = InlineKeyboardBuilder()
     for code, label in VULNERABILITY_OPTIONS.items():
@@ -288,6 +295,23 @@ def is_valid_email(email: str) -> bool:
         socket.setdefaulttimeout(original_timeout)
 
 
+def is_valid_birth_date(value: str) -> bool:
+    try:
+        parsed = datetime.strptime(value.strip(), "%d.%m.%Y").date()
+    except ValueError:
+        return False
+
+    today = datetime.now().date()
+
+    if parsed >= today:
+        return False
+
+    if parsed.year < 1900:
+        return False
+
+    return True
+
+
 def summary(data: dict) -> str:
     txt = (
         "<b>Перевірте, та підтвердіть, будь ласка, дані:</b>\n\n"
@@ -296,7 +320,7 @@ def summary(data: dict) -> str:
         f"Email: {data.get('email', '')}\n"
         f"Адреса проживання: {data.get('location', '')}\n"
         f"Стать: {data.get('gender', '')}\n"
-        f"Вік: {data.get('age', '')}\n"
+        f"Дата народження: {data.get('birth_date', '')}\n"
         f"Категорії: {', '.join(data.get('vulnerability_labels', []))}\n"
         f"Напрямок: {data.get('consult', '')}\n"
         f"Питання: {data.get('question', '')}\n"
@@ -390,21 +414,22 @@ async def gender_handler_start(message: Message, state: FSMContext) -> None:
 
 
 @dp.callback_query(Form.gender, F.data.startswith("g:"))
-async def age_handler_start(callback: CallbackQuery, state: FSMContext) -> None:
+async def birth_date_handler_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(gender=callback.data.split(":", 1)[1])
-    await state.set_state(Form.age)
-    await callback.message.edit_text("Вкажіть Ваш вік:")
+    await state.set_state(Form.birth_date)
+    await callback.message.edit_text("Вкажіть дату народження у форматі дд.мм.рррр:")
     await callback.answer()
 
 
-@dp.message(Form.age)
+@dp.message(Form.birth_date)
 async def vuln_handler_start(message: Message, state: FSMContext) -> None:
-    age = message.text.strip()
-    if not age.isdigit():
-        await message.answer("Вік треба вказати числом.")
+    birth_date = message.text.strip()
+
+    if not is_valid_birth_date(birth_date):
+        await message.answer("Некоректна дата. Вкажіть дату народження у форматі дд.мм.рррр, наприклад 15.04.1985")
         return
 
-    await state.update_data(age=age, vulnerability_labels=[])
+    await state.update_data(birth_date=birth_date, vulnerability_labels=[])
     await state.set_state(Form.vuln)
     await message.answer(
         "Оберіть категорії вразливості. Можна вибрати декілька. Після вибору натисніть «Готово».",
@@ -577,7 +602,7 @@ async def done_handler(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
     await state.clear()
-    await callback.message.answer(txt)
+    await callback.message.answer(txt, reply_markup=kb_restart())
     await callback.answer("Запис підтверджено")
 
 
@@ -586,6 +611,13 @@ async def cancel_handler(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await callback.message.edit_text(WELCOME_TEXT, reply_markup=kb_start())
     await callback.answer("Скасовано")
+
+
+@dp.callback_query(F.data == "restart")
+async def restart_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await callback.message.answer(WELCOME_TEXT, reply_markup=kb_start())
+    await callback.answer()
 
 
 async def main() -> None:
