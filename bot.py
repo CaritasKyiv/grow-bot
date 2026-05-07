@@ -238,12 +238,20 @@ def kb_vuln(selected: list[str]):
 
 def dates() -> list[date]:
     result = []
-    current = datetime.now().date()
+    now = datetime.now()
+    current = now.date()
     end = current + timedelta(days=30)
 
     while current <= end:
         if current.weekday() == 2:
-            result.append(current)
+            deadline = datetime.combine(
+                current - timedelta(days=1),
+                datetime.strptime("18:00", "%H:%M").time()
+            )
+
+            if now <= deadline:
+                result.append(current)
+
         current += timedelta(days=1)
 
     return result
@@ -251,8 +259,11 @@ def dates() -> list[date]:
 
 def kb_dates():
     b = InlineKeyboardBuilder()
-    for d in dates():
+    available_dates = dates()
+
+    for d in available_dates:
         b.button(text=d.strftime("%d.%m.%Y"), callback_data=f"d:{d.isoformat()}")
+
     b.adjust(1)
     return b.as_markup()
 
@@ -263,6 +274,20 @@ def kb_times(selected_date: str, code: str, label: str):
         b.button(text=t, callback_data=f"t:{selected_date}|{t}")
     b.adjust(2)
     return b.as_markup()
+
+
+def is_date_still_open(selected_date: str) -> bool:
+    try:
+        consultation_date = datetime.strptime(selected_date, "%Y-%m-%d").date()
+    except ValueError:
+        return False
+
+    deadline = datetime.combine(
+        consultation_date - timedelta(days=1),
+        datetime.strptime("18:00", "%H:%M").time()
+    )
+
+    return datetime.now() <= deadline
 
 
 def is_valid_phone(phone: str) -> bool:
@@ -485,6 +510,12 @@ async def date_handler_start(message: Message, state: FSMContext) -> None:
         await message.answer("Будь ласка, опишіть питання детальніше. Потрібно не менше 100 символів.")
         return
 
+    if not dates():
+        await message.answer(
+            "Наразі немає доступних дат для запису. Запис на консультацію закривається о 18:00 попереднього дня."
+        )
+        return
+
     await state.update_data(question=question)
     await state.set_state(Form.date)
     await message.answer("Оберіть дату:", reply_markup=kb_dates())
@@ -494,6 +525,15 @@ async def date_handler_start(message: Message, state: FSMContext) -> None:
 async def time_handler_start(callback: CallbackQuery, state: FSMContext) -> None:
     selected_date = callback.data.split(":", 1)[1]
     data = await state.get_data()
+
+    if not is_date_still_open(selected_date):
+        await state.set_state(Form.date)
+        await callback.message.edit_text(
+            "Запис на цю дату вже закрито. Оберіть, будь ласка, іншу дату:",
+            reply_markup=kb_dates()
+        )
+        await callback.answer()
+        return
 
     free_times = available_times(data["code"], data["consult"], selected_date)
     if not free_times:
@@ -515,6 +555,16 @@ async def format_handler_start(callback: CallbackQuery, state: FSMContext) -> No
     selected_date, selected_time = callback.data.split(":", 1)[1].split("|", 1)
 
     data = await state.get_data()
+
+    if not is_date_still_open(selected_date):
+        await state.set_state(Form.date)
+        await callback.message.edit_text(
+            "Запис на цю дату вже закрито. Оберіть, будь ласка, іншу дату:",
+            reply_markup=kb_dates()
+        )
+        await callback.answer()
+        return
+
     if selected_time in get_taken_slots(data["consult"], selected_date):
         await callback.message.edit_text(
             "Цей слот уже зайнятий. Оберіть, будь ласка, інший час:",
@@ -571,6 +621,15 @@ async def confirm_handler(callback: CallbackQuery, state: FSMContext) -> None:
 @dp.callback_query(Form.confirm, F.data == "ok")
 async def done_handler(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
+
+    if not is_date_still_open(data["date"]):
+        await state.clear()
+        await callback.message.answer(
+            "На жаль, запис на цю дату вже закрито. Запис можливий лише до 18:00 попереднього дня."
+        )
+        await callback.message.answer(WELCOME_TEXT, reply_markup=kb_start())
+        await callback.answer("Запис закрито")
+        return
 
     if data["time"] in get_taken_slots(data["consult"], data["date"]):
         await state.clear()
