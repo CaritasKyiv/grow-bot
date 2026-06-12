@@ -57,6 +57,8 @@ dp = Dispatcher(storage=MemoryStorage())
 
 LEGAL_ZOOM = "https://us04web.zoom.us/j/3059870825?pwd=S2ozbDg4Mi9EQkxFaXB0QUVsUlFFQT09"
 FINANCIAL_ZOOM = "https://us05web.zoom.us/j/5101715546?pwd=jA48a2jeSO7FFLmCbCreP5lbOMGcnb.1"
+LIVELIHOOD_ZOOM = "https://us05web.zoom.us/j/89274474849?pwd=GFfYpIfribpM5V9DTMajUZ04qrwOAT.1"
+
 ADDRESS = "м. Київ, вул. М. Берлінського, буд. 15"
 MAP_LAT = 50.475072050435394
 MAP_LON = 30.440719552813096
@@ -64,8 +66,8 @@ MAP_LON = 30.440719552813096
 WELCOME_TEXT = (
     "ОГОЛОШЕННЯ\n\n"
     "Команда експертів проєкту GROW з економічного відновлення вітає Вас!\n"
-    "Наші спеціалісти готові надати консультаційну підтримку з фінансових "
-    "та юридичних питань для старту та розвитку власної справи.\n\n"
+    "Наші спеціалісти готові надати консультаційну підтримку з фінансових, "
+    "юридичних та питань стосовно працевлаштування та самозайнятості.\n\n"
     "Персональні консультації надаються безкоштовно для мешканців м. Києва та "
     "Київської області, які постраждали внаслідок військової агресії та належать "
     "до вразливих категорій.\n\n"
@@ -106,12 +108,17 @@ VULNERABILITY_OPTIONS = {
 CONSULTATION_TYPES = {
     "legal": "Юридичні",
     "financial": "Фінансові",
+    "livelihood": "Працевлаштування та самозайнятість",
 }
 
 
 def get_zoom_link(consult_code: str) -> str:
     if consult_code == "financial":
         return FINANCIAL_ZOOM
+
+    if consult_code == "livelihood":
+        return LIVELIHOOD_ZOOM
+
     return LEGAL_ZOOM
 
 
@@ -134,6 +141,24 @@ def save_to_sheet(data: dict) -> None:
     sheet.append_row(row)
 
 
+def color_last_row(consultation: str) -> None:
+    rows_count = len(sheet.get_all_values())
+
+    if consultation == "Юридичні":
+        color = {"red": 0.85, "green": 0.92, "blue": 1.0}
+    elif consultation == "Фінансові":
+        color = {"red": 0.88, "green": 0.97, "blue": 0.88}
+    elif consultation == "Працевлаштування та самозайнятість":
+        color = {"red": 1.0, "green": 0.97, "blue": 0.80}
+    else:
+        return
+
+    sheet.format(
+        f"A{rows_count}:M{rows_count}",
+        {"backgroundColor": color}
+    )
+
+
 def get_taken_slots(label: str, selected_date: str) -> set[str]:
     rows = sheet.get_all_values()
     taken = set()
@@ -148,8 +173,9 @@ def get_taken_slots(label: str, selected_date: str) -> set[str]:
 
 
 def times(code: str) -> list[str]:
-    if code == "financial":
+    if code in ["financial", "livelihood"]:
         return ["10:00", "11:00", "12:00", "13:00", "14:00", "15:00"]
+
     return ["10:30", "11:30", "12:30", "13:30", "14:30", "15:30"]
 
 
@@ -184,6 +210,7 @@ def kb_consult():
     b = InlineKeyboardBuilder()
     b.button(text="Юридичні", callback_data="c:legal")
     b.button(text="Фінансові", callback_data="c:financial")
+    b.button(text="Працевлаштування та самозайнятість", callback_data="c:livelihood")
     b.adjust(1)
     return b.as_markup()
 
@@ -641,6 +668,7 @@ async def done_handler(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     save_to_sheet(data)
+    color_last_row(data["consult"])
 
     txt = (
         "Дякуємо за Ваш час.\n\n"
